@@ -1,117 +1,76 @@
-import { join } from 'path'
-import { createBot, createProvider, createFlow, addKeyword, utils } from '@builderbot/bot'
-import { PostgreSQLAdapter as Database } from '@builderbot/database-postgres'
+import 'dotenv/config'
+import { createBot, createProvider, createFlow } from '@builderbot/bot'
+import { JsonFileDB as Database } from '@builderbot/database-json'
 import { BaileysProvider as Provider } from '@builderbot/provider-baileys'
+import { entryFlow, greetingFlow } from './flows/entry.flow'
+import { mainConversationFlow } from './flows/main-conversation.flow'
+import { fallbackFlow } from './flows/fallback.flow'
 
 const PORT = process.env.PORT ?? 3008
 
-const discordFlow = addKeyword<Provider, Database>('doc').addAnswer(
-    ['You can see the documentation here', '📄 https://builderbot.app/docs \n', 'Do you want to continue? *yes*'].join(
-        '\n'
-    ),
-    { capture: true },
-    async (ctx, { gotoFlow, flowDynamic }) => {
-        if (ctx.body.toLocaleLowerCase().includes('yes')) {
-            return gotoFlow(registerFlow)
-        }
-        await flowDynamic('Thanks!')
-        return
-    }
-)
-
-const welcomeFlow = addKeyword<Provider, Database>(['hi', 'hello', 'hola'])
-    .addAnswer(`🙌 Hello welcome to this *Chatbot*`)
-    .addAnswer(
-        [
-            'I share with you the following links of interest about the project',
-            '👉 *doc* to view the documentation',
-        ].join('\n'),
-        { delay: 800, capture: true },
-        async (ctx, { fallBack }) => {
-            if (!ctx.body.toLocaleLowerCase().includes('doc')) {
-                return fallBack('You should type *doc*')
-            }
-            return
-        },
-        [discordFlow]
-    )
-
-const registerFlow = addKeyword<Provider, Database>(utils.setEvent('REGISTER_FLOW'))
-    .addAnswer(`What is your name?`, { capture: true }, async (ctx, { state }) => {
-        await state.update({ name: ctx.body })
-    })
-    .addAnswer('What is your age?', { capture: true }, async (ctx, { state }) => {
-        await state.update({ age: ctx.body })
-    })
-    .addAction(async (_, { flowDynamic, state }) => {
-        await flowDynamic(`${state.get('name')}, thanks for your information!: Your age: ${state.get('age')}`)
-    })
-
-const fullSamplesFlow = addKeyword<Provider, Database>(['samples', utils.setEvent('SAMPLES')])
-    .addAnswer(`💪 I'll send you a lot files...`)
-    .addAnswer(`Send image from Local`, { media: join(process.cwd(), 'assets', 'sample.png') })
-    .addAnswer(`Send video from URL`, {
-        media: 'https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExYTJ0ZGdjd2syeXAwMjQ4aWdkcW04OWlqcXI3Ynh1ODkwZ25zZWZ1dCZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/LCohAb657pSdHv0Q5h/giphy.mp4',
-    })
-    .addAnswer(`Send audio from URL`, { media: 'https://cdn.freesound.org/previews/728/728142_11861866-lq.mp3' })
-    .addAnswer(`Send file from URL`, {
-        media: 'https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf',
-    })
-
 const main = async () => {
-    const adapterFlow = createFlow([welcomeFlow, registerFlow, fullSamplesFlow])
-    
-    // If you experience ERRO AUTH issues, check the latest WhatsApp version at:
-    // https://wppconnect.io/whatsapp-versions/
-    // Example: version "2.3000.1035824857-alpha" -> [2, 3000, 1035824857]
-    const adapterProvider = createProvider(Provider, 
-		{ version: [2, 3000, 1035824857] } 
-	)
-    const adapterDB = new Database({
-       host: process.env.POSTGRES_DB_HOST,
-       user: process.env.POSTGRES_DB_USER,
-       database: process.env.POSTGRES_DB_NAME,
-       password: process.env.POSTGRES_DB_PASSWORD,
-       port: +process.env.POSTGRES_DB_PORT
-   })
+    try {
+        const adapterFlow = createFlow([
+            entryFlow,
+            greetingFlow,
+            mainConversationFlow,
+            fallbackFlow,
+        ])
+        
+        // If you experience AUTH issues, check the latest WhatsApp version at:
+        // https://wppconnect.io/whatsapp-versions/
+        // Example: version "2.3000.1035824857-alpha" -> [2, 3000, 1035824857]
+        const adapterProvider = createProvider(Provider, {
+            version: [2, 3000, 1035824857],
+        })
 
-    const { handleCtx, httpServer } = await createBot({
-        flow: adapterFlow,
-        provider: adapterProvider,
-        database: adapterDB,
-    })
+        console.log('🔌 Using JSON file database...')
+        const adapterDB = new Database()
 
+        console.log('✅ JSON file database initialized')
+
+        const botInstance = await createBot({
+            flow: adapterFlow,
+            provider: adapterProvider,
+            database: adapterDB,
+        })
+
+        const { handleCtx, httpServer } = botInstance
+        
+        console.log('✅ Bot initialized successfully')
+
+    /**
+     * POST /v1/messages - Send message to user
+     */
     adapterProvider.server.post(
         '/v1/messages',
         handleCtx(async (bot, req, res) => {
             const { number, message, urlMedia } = req.body
+
+            if (!number || !message) {
+                res.writeHead(400, { 'Content-Type': 'application/json' })
+                return res.end(JSON.stringify({ status: 'error', message: 'number and message required' }))
+            }
+
             await bot.sendMessage(number, message, { media: urlMedia ?? null })
-            return res.end('sended')
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            return res.end(JSON.stringify({ status: 'sent', number }))
         })
     )
 
-    adapterProvider.server.post(
-        '/v1/register',
-        handleCtx(async (bot, req, res) => {
-            const { number, name } = req.body
-            await bot.dispatch('REGISTER_FLOW', { from: number, name })
-            return res.end('trigger')
-        })
-    )
-
-    adapterProvider.server.post(
-        '/v1/samples',
-        handleCtx(async (bot, req, res) => {
-            const { number, name } = req.body
-            await bot.dispatch('SAMPLES', { from: number, name })
-            return res.end('trigger')
-        })
-    )
-
+    /**
+     * POST /v1/blacklist - Manage blacklist
+     */
     adapterProvider.server.post(
         '/v1/blacklist',
         handleCtx(async (bot, req, res) => {
             const { number, intent } = req.body
+
+            if (!number || !intent) {
+                res.writeHead(400, { 'Content-Type': 'application/json' })
+                return res.end(JSON.stringify({ status: 'error', message: 'number and intent required' }))
+            }
+
             if (intent === 'remove') bot.blacklist.remove(number)
             if (intent === 'add') bot.blacklist.add(number)
 
@@ -120,6 +79,9 @@ const main = async () => {
         })
     )
 
+    /**
+     * GET /v1/blacklist/list - Get blacklist
+     */
     adapterProvider.server.get(
         '/v1/blacklist/list',
         handleCtx(async (bot, req, res) => {
@@ -129,7 +91,12 @@ const main = async () => {
         })
     )
 
-    httpServer(+PORT)
+        httpServer(+PORT)
+        console.log(`✅ Bot running on port ${PORT}`)
+    } catch (error) {
+        console.error('❌ Error starting bot:', error instanceof Error ? error.message : error)
+        process.exit(1)
+    }
 }
 
 main()
